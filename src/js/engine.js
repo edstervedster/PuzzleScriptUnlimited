@@ -492,7 +492,7 @@ function gotoLink() {
   	if (solving) return;
 	for (const position of playerPositions) {
 		const level = state.levels[curLevelNo];
-		const objids = level.getObjects(position);
+		const objids = curLevel.getObjects(position);  // Use curLevel (current state), not level (original definition)
 		for (const link of state.links // use the most recent visible link definition
 				.slice(0, level.linksTop)
 				.reverse()) {
