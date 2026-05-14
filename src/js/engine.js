@@ -1442,12 +1442,16 @@ function DoUndo(force,ignoreDuplicates, resetTween = true, resetAutoTick = true,
   if (backups.length>0) {
     var torestore = backups[backups.length-1];
 	if (debugSwitch.includes('undo')) console.log(`DoUndo length=${backups.length} torestore=`, torestore);
-    restoreLevel(torestore, null, resetTween, resetAutoTick); 
+    var levelBeforeUndo = curLevelNo;
+    restoreLevel(torestore, null, resetTween, resetAutoTick);
 	updateCameraPositionTarget();
     backups = backups.splice(0,backups.length-1);
-	// look for undo across link
-	if (linkStack.length > 0 && linkStack.at(-1).backupTop == backups.length)
+	// look for undo across link - check if we actually changed levels
+	if (linkStack.length > 0 && curLevelNo != levelBeforeUndo) {
+	  // Reset restartTarget to the level we're returning to
+	  restartTarget = backupLevel();
 	  linkStack.pop();
+	}
     if (! force || forceSFX) {
       tryPlayUndoSound();
     }
