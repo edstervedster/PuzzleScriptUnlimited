@@ -2933,94 +2933,122 @@ function applyRuleGroup(ruleGroup) {
     return loopPropagated;
 }
 
-function applyRules(rules, loopPoint, subroutines, startRuleGroupindex, bannedGroup){
-	//console.log(`Apply rules rules:${rules.length} objects:${level.objects}`);
+function applyRules(rules, loopPointOrMeta, subroutines, startRuleGroupindex, bannedGroup){
+	// loopPointOrMeta: { list, jumps } for nested startloop; missing keys treated as no loops
+	var loopJumps = (loopPointOrMeta && loopPointOrMeta.jumps) ? loopPointOrMeta.jumps : {};
+	var loopList = (loopPointOrMeta && loopPointOrMeta.list) ? loopPointOrMeta.list : [];
+	var nLoops = loopList.length;
+	var perLoop = nLoops ? new Array(nLoops) : null;
+	if (nLoops) for (var pi = 0; pi < nLoops; pi++) perLoop[pi] = false;
+	if (debugSwitch.includes('rules')) {
+		var lineList = rules.map(function(rg, idx){ return idx + ':L' + rg[0].lineNumber; }).join(' ');
+		consolePrint('[rules] table: ' + lineList, true);
+		consolePrint('[rules] loopList: ' + JSON.stringify(loopList), true);
+		consolePrint('[rules] loopJumps: ' + JSON.stringify(loopJumps), true);
+	}
 
-	// find the end of this block of rule groups
 	function findEnd(start) {
-		let result = -1;
+		var result = -1;
 		if (start < rules.length) {
-			// find the subroutine after the one we are in, if any
-			// note: trouble if it's an ==
-			let x = subroutines.findIndex(s => s.lineNumber > rules[start][0].lineNumber);
-			// find the rule group for that line number
+			var x = subroutines.findIndex(s => s.lineNumber > rules[start][0].lineNumber);
 			if (x != -1)
-				result = rules.findIndex(r => r[0].lineNumber >= subroutines[x].lineNumber) 
+				result = rules.findIndex(r => r[0].lineNumber >= subroutines[x].lineNumber);
 		}
 		return (result == -1) ? rules.length : result;
 	}
 
-	perfCounters.tries++;
-    //for each rule
-    //try to match it
-
-    playerPositions = getPlayerPositions();
-	
-	// stack of rule group index to return to at end of subroutine
-	const gosubStack = []; // PS>
-
-    //when we're going back in, let's loop, to be sure to be sure
-    let loopPropagated = startRuleGroupindex > 0;
-    let loopCount = 0;
-	let endIndex = findEnd(startRuleGroupindex);
-    for (let ruleGroupIndex = startRuleGroupindex; ruleGroupIndex < endIndex; ) {
-		// first process the rule and check for endloop
-		if (bannedGroup && bannedGroup[ruleGroupIndex]) {
-			//do nothing
-		} else {
-			const ruleGroup = rules[ruleGroupIndex];
-			loopPropagated = applyRuleGroup(ruleGroup) || loopPropagated;
+	function setPerForGroup(g, ch) {
+		if (!ch || !perLoop) return;
+		for (var li = 0; li < nLoops; li++) {
+			var Lg = loopList[li];
+			if (Lg.firstG <= g && g <= Lg.lastG) perLoop[li] = true;
 		}
-		// loop ends right here
-        if (loopPropagated && loopPoint[ruleGroupIndex] >= 0) { 
-			if (checkLoop())
-				break; 
-		} else {
-			if (gosubTarget >= 0) {
-				// push current location so on return we can check if at end
-				gosubStack.push(ruleGroupIndex);  // todo: push loop point
-				if (verbose_logging)
-					consolePrint(`Gosub to ${htmlJump(rules[gosubTarget][0].lineNumber)}`, true, rules[ruleGroupIndex][0].lineNumber);
-				ruleGroupIndex = gosubTarget;
-				endIndex = findEnd(ruleGroupIndex);
-				gosubTarget = -1;
-				//console.log(`gosub group:${ruleGroupIndex} line:${rules[ruleGroupIndex][0].lineNumber}`)
-				if (debugSwitch.includes('gosub')) console.log(`gosub1 group:${ruleGroupIndex} line:${rules[ruleGroupIndex][0].lineNumber} endindex:${endIndex}`, gosubStack);
-			} else {
-				ruleGroupIndex++;
-				// note special for loops and gosubs that end after the last rule
-				if (ruleGroupIndex == endIndex && loopPropagated && loopPoint[ruleGroupIndex] >= 0) {
-					if (checkLoop())
-						break; 
-				}		
-
-				// loop to handle stacked returns
-				while (ruleGroupIndex == endIndex && gosubStack.length > 0) {
-					if (verbose_logging)
-						consolePrint(`Return to ${htmlJump(rules[gosubStack.at(-1)][0].lineNumber)}`, true);
-					ruleGroupIndex = gosubStack.pop();
-					endIndex = findEnd(ruleGroupIndex);
-					ruleGroupIndex++;
-					if (debugSwitch.includes('gosub')) console.log(`gosub2 group:${ruleGroupIndex} line:${rules[ruleGroupIndex][0].lineNumber} endindex:${endIndex}`, gosubStack);
+	}
+	function clearOnJumpTo(Lp) {
+		if (!perLoop) return;
+		for (var c = 0; c < nLoops; c++) {
+			var p = loopList[c];
+			if (Lp.firstG <= p.firstG && p.lastG <= Lp.lastG) perLoop[c] = false;
+		}
+	}
+	/** @returns { null | number = new index, -1 = break out with error } */
+	function tryJumpsAtKey(jKey) {
+		var ids = loopJumps[jKey];
+		if (!perLoop || !ids || !ids.length) return null;
+		if (debugSwitch.includes('gosub')) console.log(`[jump?] key:${jKey} ids:${JSON.stringify(ids)} perLoop:${JSON.stringify(perLoop)}`);
+		for (var ii = 0; ii < ids.length; ii++) {
+			var id = ids[ii];
+			if (perLoop[id]) {
+				var L = loopList[id];
+				clearOnJumpTo(L);
+				loopCount++;
+				if (loopCount > 200) {
+					var rgx = rules[L.targetG];
+					if (rgx) logErrorCacheable("got caught in an endless startloop...endloop vortex, escaping!", rgx[0].lineNumber, true);
+					return -1;
 				}
+				if (debugSwitch.includes('gosub')) console.log(`[jump!] to group:${L.targetG} firstG:${L.firstG} lastG:${L.lastG}`);
+				return L.targetG;
 			}
 		}
+		return null;
+	}
 
-		if (verbose_logging){
-			debugger_turnIndex++;
-			addToDebugTimeline(curLevel,-2);//pre-movement-applied debug state
+	perfCounters.tries++;
+	playerPositions = getPlayerPositions();
+	var gosubStack = [];
+	var loopCount = 0;
+	var endIndex = findEnd(startRuleGroupindex);
+	outer: for (var ruleGroupIndex = startRuleGroupindex; ruleGroupIndex < endIndex; ) {
+		if (debugSwitch.includes('gosub')) console.log(`iter g:${ruleGroupIndex} line:${rules[ruleGroupIndex] ? rules[ruleGroupIndex][0].lineNumber : '?'} end:${endIndex} stack:${gosubStack.length}`);
+		if (!(bannedGroup && bannedGroup[ruleGroupIndex])) {
+			var ruleGroup = rules[ruleGroupIndex];
+			var ch0 = applyRuleGroup(ruleGroup);
+			setPerForGroup(ruleGroupIndex, ch0);
 		}
-
-		function checkLoop() {
-			ruleGroupIndex = loopPoint[ruleGroupIndex];
-			loopPropagated = false;
-			loopCount++;
-			if (loopCount > 200) {
-				var ruleGroup = rules[ruleGroupIndex];
-				logErrorCacheable("got caught in an endless startloop...endloop vortex, escaping!", ruleGroup[0].lineNumber, true);
-				return true;
-			}	
+		// Gosub is part of rule execution: enter the subroutine before any loop-jump check.
+		// When the subroutine returns we pop below and then re-check the caller's jump key.
+		if (gosubTarget >= 0) {
+			gosubStack.push({ ruleGroupIndex, endIndex });
+			if (verbose_logging)
+				consolePrint(`Gosub to ${htmlJump(rules[gosubTarget][0].lineNumber)}`, true, rules[ruleGroupIndex][0].lineNumber);
+			ruleGroupIndex = gosubTarget;
+			endIndex = findEnd(ruleGroupIndex);
+			gosubTarget = -1;
+			if (debugSwitch.includes('gosub')) console.log(`gosub1 group:${ruleGroupIndex} line:${rules[ruleGroupIndex][0].lineNumber} endindex:${endIndex}`, gosubStack);
+			if (verbose_logging) { debugger_turnIndex++; addToDebugTimeline(curLevel,-2); }
+			continue;
 		}
+		// Rule fully executed. Check for a loop jump at this position.
+		if (!(bannedGroup && bannedGroup[ruleGroupIndex])) {
+			var nxt = tryJumpsAtKey(ruleGroupIndex);
+			if (nxt === -1) break outer;
+			if (nxt != null) {
+				ruleGroupIndex = nxt;
+				if (verbose_logging) { debugger_turnIndex++; addToDebugTimeline(curLevel,-2); }
+				continue;
+			}
+		}
+		// No jump: advance, popping completed subroutines. After each pop we re-check the
+		// jump key at the caller's position, because the gosub is considered done there.
+		ruleGroupIndex++;
+		while (ruleGroupIndex == endIndex && gosubStack.length > 0) {
+			if (verbose_logging)
+				consolePrint(`Return to ${htmlJump(rules[gosubStack.at(-1).ruleGroupIndex][0].lineNumber)}`, true);
+			var fr = gosubStack.pop();
+			ruleGroupIndex = fr.ruleGroupIndex;
+			endIndex = fr.endIndex;
+			if (debugSwitch.includes('gosub')) console.log(`gosub2 group:${ruleGroupIndex} line:${rules[ruleGroupIndex][0].lineNumber} endindex:${endIndex}`, gosubStack);
+			var nxt2 = tryJumpsAtKey(ruleGroupIndex);
+			if (nxt2 === -1) break outer;
+			if (nxt2 != null) {
+				ruleGroupIndex = nxt2;
+				if (verbose_logging) { debugger_turnIndex++; addToDebugTimeline(curLevel,-2); }
+				continue outer;
+			}
+			ruleGroupIndex++;
+		}
+		if (verbose_logging) { debugger_turnIndex++; addToDebugTimeline(curLevel,-2); }
 	}
 }
 
@@ -3276,7 +3304,7 @@ function procInp(dir,dontDoWin,dontModify,bak,coord) {
         	rigidloop=false;
         	i++;
 
-			applyRules(state.rules, state.loopPoint, state.subroutines, startRuleGroupIndex, bannedGroup);
+			applyRules(state.rules, { jumps: state.loopJumps, list: state.loopList }, state.subroutines, startRuleGroupIndex, bannedGroup);
         	var shouldUndo = resolveMovements(curLevel, bannedGroup, dontModify);
 			
         	if (shouldUndo) {
@@ -3337,7 +3365,7 @@ function procInp(dir,dontDoWin,dontModify,bak,coord) {
 						consolePrint('Applying late rules.');
 					}
 				}
-        		applyRules(state.lateRules, state.lateLoopPoint, state.subroutines, 0);
+        		applyRules(state.lateRules, { jumps: state.lateLoopJumps, list: state.lateLoopList }, state.subroutines, 0);
         		startRuleGroupIndex=0;
         	}
         } while (i < 250 && rigidloop);
@@ -3345,7 +3373,7 @@ function procInp(dir,dontDoWin,dontModify,bak,coord) {
         if (i>=250) {
           consolePrint("looped through 250 times, gave up. Too many loops!");
           
-          applyRules(state.lateRules, state.lateLoopPoint, state.subroutines, 0);
+          applyRules(state.lateRules, { jumps: state.lateLoopJumps, list: state.lateLoopList }, state.subroutines, 0);
           startRuleGroupIndex=0;
           
           backups.push(bak);

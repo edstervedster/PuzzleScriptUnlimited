@@ -3362,105 +3362,119 @@ function removeDuplicateRules(state) {
     }
 }
 
+/** @returns { { firstG: number, lastG: number, jumpKey: number, virtual: boolean, error?: string } } */
+function findLoopRangeForPair(rules, startline, endline) {
+    const n = rules.length;
+    let t = -1;
+    for (let i = 0; i < n; i++) {
+        if (rules[i][0].lineNumber >= startline) {
+            t = i;
+            break;
+        }
+    }
+    if (t < 0)
+        return { error: "no" };
+    for (let i = 0; i < n; i++) {
+        if (rules[i][0].lineNumber >= endline) {
+            const s = i - 1;
+            if (s >= t) {
+                return { firstG: t, lastG: s, jumpKey: s, virtual: false };
+            }
+            return { error: "empty" };
+        }
+    }
+    return { firstG: t, lastG: n - 1, jumpKey: n, virtual: true };
+}
+
+/**
+ * Pairs in closing order: inner first. Per-table ids start at 0; jumps[key] lists ids inner-to-outer.
+ * key == rules.length is the virtual end-of-block position.
+ */
+function buildLoopJumpsForTable(rules, pairs) {
+    const loopList = [];
+    const jumps = {};
+    for (const pr of pairs) {
+        const r = findLoopRangeForPair(rules, pr.start, pr.end);
+        if (r.error) {
+            continue;
+        }
+        for (let g = r.firstG; g <= r.lastG; g++) {
+            const g0 = rules[g][0].lineNumber;
+            const g1 = rules[g][rules[g].length - 1].lineNumber;
+            if (pr.end >= g0 && pr.end <= g1) {
+                logWarning("Found a loop point in the middle of a rule. You probably don't want to do this, right?", pr.end);
+            }
+        }
+        const o = { id: loopList.length, firstG: r.firstG, lastG: r.lastG, targetG: r.firstG, jumpKey: r.jumpKey };
+        loopList.push(o);
+        const jk = r.jumpKey;
+        if (!jumps[jk]) jumps[jk] = [];
+        jumps[jk].push(o.id);
+    }
+    for (const k in jumps) {
+        jumps[k].sort((a, b) => a - b);
+    }
+    return { loopList, jumps };
+}
+
+function collectLoopPairs(state) {
+    const stack = [];
+    const pairs = [];
+    for (const loop of state.loops) {
+        if (loop[1] === 1) {
+            stack.push({ start: loop[0], startLine: loop[0] });
+        } else if (loop[1] === -1) {
+            if (stack.length === 0) {
+                logError("Found an ENDLOOP, but I'm not in a loop?", loop[0]);
+                continue;
+            }
+            const s = stack.pop();
+            pairs.push({ start: s.start, end: loop[0], startLine: s.startLine, endLine: loop[0] });
+        }
+    }
+    for (const s of stack) {
+        logError("Found a STARTLOOP without a corresponding ENDLOOP.", s.start);
+    }
+    return pairs;
+}
+
 function generateLoopPoints(state) {
-    var loopPoint = {};
-    var loopPointIndex = 0;
-    var outside = true;
-    var source = 0;
-    var target = 0;
-    if (state.loops.length > 0) {
-        for (var i=0;i<state.loops.length;i++){
-            var loop = state.loops[i];
-            if (i%2===0){
-                if (loop[1]===-1){         
-                    logError("Found an ENDLOOP, but I'm not in a loop?",loop[0]);
-                }
-            } else {
-                if (loop[1]===1){         
-                    logError("Found a STARTLOOP, but I'm already inside a loop? (Puzzlescript can't nest loops, FWIW).",loop[0]);
-                }
-            }
-        }
-        var lastloop=state.loops[state.loops.length-1];
-        if (lastloop[1]!==-1){
-            logError("Yo I found a STARTLOOP without a corresponding ENDLOOP.",lastloop[0]);
-
-        }
-        // logError("Have to have matching number of  'startLoop' and 'endLoop' loop points.",state.loops[state.loops.length-1][0]);
+    const pairs = collectLoopPairs(state);
+    if (debugSwitch.includes('rules')) {
+        console.log('Loop pairs', pairs);
+        console.log('Late rule lines', state.lateRules.map(rg => rg[0].lineNumber));
     }
-
-    for (var j = 0; j < state.loops.length; j++) {
-        var loop = state.loops[j];
-        for (var i = 0; i < state.rules.length; i++) {
-            var ruleGroup = state.rules[i];
-
-            var firstRule = ruleGroup[0];
-            var lastRule = ruleGroup[ruleGroup.length - 1];
-
-            var firstRuleLine = firstRule.lineNumber;
-            var lastRuleLine = lastRule.lineNumber;
-
-            if (loop[0] >= firstRuleLine && loop[0] <= lastRuleLine) {
-                logWarning("Found a loop point in the middle of a rule. You probably don't want to do this, right?", loop[0]);
-            }
-            if (outside) {
-                if (firstRuleLine >= loop[0]) {
-                    target = i;
-                    outside = false;
-                    break;
-                }
-            } else {
-                if (firstRuleLine >= loop[0]) {
-                    source = i - 1;
-                    // this test can fail if there are no rules between startloop and endloop, either way
-                    if (source >= target)
-                        loopPoint[source] = target;
-                    outside = true;
-                    break;
-                }
-            }
-        }
+    if (pairs.length === 0) {
+        state.loopList = [];
+        state.loopJumps = {};
+        state.lateLoopList = [];
+        state.lateLoopJumps = {};
+        state.loopPoint = {};
+        state.lateLoopPoint = {};
+        return;
     }
-    if (outside === false) {
-        var source = state.rules.length;
-        loopPoint[source] = target;
-    } else {}
-    state.loopPoint = loopPoint;
-
-    loopPoint = {};
-    outside = true;
-    for (var j = 0; j < state.loops.length; j++) {
-        var loop = state.loops[j];
-        for (var i = 0; i < state.lateRules.length; i++) {
-            var ruleGroup = state.lateRules[i];
-
-            var firstRule = ruleGroup[0];
-            var lastRule = ruleGroup[ruleGroup.length - 1];
-
-            var firstRuleLine = firstRule.lineNumber;
-            var lastRuleLine = lastRule.lineNumber;
-
-            if (outside) {
-                if (firstRuleLine >= loop[0]) {
-                    target = i;
-                    outside = false;
-                    break;
-                }
-            } else {
-                if (firstRuleLine >= loop[0]) {
-                    source = i - 1;
-                    loopPoint[source] = target;
-                    outside = true;
-                    break;
-                }
-            }
+    const a = buildLoopJumpsForTable(state.rules, pairs);
+    state.loopList = a.loopList;
+    state.loopJumps = a.jumps;
+    const b = buildLoopJumpsForTable(state.lateRules, pairs);
+    state.lateLoopList = b.loopList;
+    state.lateLoopJumps = b.jumps;
+    {
+        const loopPoint = {};
+        for (const L of state.loopList) {
+            if (L.jumpKey < state.rules.length)
+                loopPoint[L.jumpKey] = L.targetG;
         }
+        state.loopPoint = loopPoint;
     }
-    if (outside === false) {
-        var source = state.lateRules.length;
-        loopPoint[source] = target;
-    } else {}
-    state.lateLoopPoint = loopPoint;
+    {
+        const loopPoint = {};
+        for (const L of state.lateLoopList) {
+            if (L.jumpKey < state.lateRules.length)
+                loopPoint[L.jumpKey] = L.targetG;
+        }
+        state.lateLoopPoint = loopPoint;
+    }
 }
 
 var soundDirectionMasks = {
@@ -3631,6 +3645,8 @@ function formatHomePage(state) {
 function loadFile(str) {
 	var processor = new codeMirrorFn();
 	var state = processor.startState();
+
+    debugSwitch = '';
 
     if (!str || str.trim().length == 0) {
         logErrorNoLine('Empty file! Compilation abandoned!', true);
